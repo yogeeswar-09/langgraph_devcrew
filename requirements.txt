@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+langserve
+langgraph
+langchain
+langchain-google-genai
+langchain-core
+python-dotenv
+sse-starlette
