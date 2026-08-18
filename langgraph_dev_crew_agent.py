@@ -5,15 +5,16 @@ from typing import TypedDict
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from langserve import add_routes
+import uvicorn
 
-from langchain_core.runnables import RunnableLambda
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.runnables import RunnableLambda
 
 from langgraph.graph import StateGraph, END
 
 
 # ============================================================
-# CONFIG
+# ENVIRONMENT
 # ============================================================
 
 load_dotenv()
@@ -21,7 +22,10 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("dev_crew")
 
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+GOOGLE_API_KEY = (
+    os.getenv("GOOGLE_API_KEY")
+    or os.getenv("GEMINI_API_KEY")
+)
 
 if not GOOGLE_API_KEY:
     raise RuntimeError(
@@ -30,169 +34,389 @@ if not GOOGLE_API_KEY:
 
 
 # ============================================================
-# GEMINI
+# LLM
 # ============================================================
 
 llm = ChatGoogleGenerativeAI(
     model="gemini-3.6-flash",
     google_api_key=GOOGLE_API_KEY,
     temperature=0.2,
-    max_retries=1,
-    timeout=30,
+    max_retries=0,
+    timeout=60,
 )
 
 
 # ============================================================
-# LANGGRAPH STATE
+# SHARED LANGGRAPH STATE
 # ============================================================
 
 class DevCrewState(TypedDict, total=False):
-    task: str
-    plan: str
+
+    user_request: str
+
+    requirements: str
+
+    architecture: str
+
     implementation: str
+
+    testing: str
+
     review: str
-    output: str
+
+    final_report: str
 
 
 # ============================================================
-# PLANNER
+# HELPER
 # ============================================================
 
-def planner(state: DevCrewState):
-
-    task = state["task"]
-
-    logger.info("DEV CREW: PLANNER")
-
-    return {
-        "plan": f"""
-Task:
-
-{task}
-
-Development plan:
-
-1. Understand the requirements.
-2. Identify the main components.
-3. Select appropriate technologies.
-4. Design the architecture.
-5. Plan implementation.
-6. Consider testing, security and deployment.
-"""
-    }
-
-
-# ============================================================
-# DEVELOPER
-# ============================================================
-
-def developer(state: DevCrewState):
-
-    logger.info("DEV CREW: DEVELOPER")
-
-    return {
-        "implementation": f"""
-Developer analysis for:
-
-{state["task"]}
-
-The solution should include:
-
-- Appropriate project structure
-- Required APIs
-- Backend/frontend components when applicable
-- Database considerations
-- Error handling
-- Configuration
-- Deployment considerations
-"""
-    }
-
-
-# ============================================================
-# REVIEWER
-# ============================================================
-
-def reviewer(state: DevCrewState):
-
-    logger.info("DEV CREW: REVIEWER")
-
-    return {
-        "review": f"""
-Technical review for:
-
-{state["task"]}
-
-Check:
-
-- Correctness
-- Missing requirements
-- Security
-- Error handling
-- Maintainability
-- Scalability
-- Deployment problems
-"""
-    }
-
-
-# ============================================================
-# FINALIZER
-# ============================================================
-
-def finalizer(state: DevCrewState):
-
-    logger.info("DEV CREW: FINALIZER")
+def ask_agent(role: str, task: str) -> str:
 
     prompt = f"""
-You are Dev Crew, a professional AI software development team.
+You are the {role} in an AI software development team called Dev Crew.
 
-USER TASK:
-{state["task"]}
+Your responsibility:
+{task}
 
-PLANNER:
-{state["plan"]}
+Work only on your assigned responsibility.
 
-DEVELOPER:
+Do not reveal chain-of-thought.
+
+Return a concise professional result that another team member
+can use as input.
+"""
+
+    try:
+
+        response = llm.invoke(prompt)
+
+        content = response.content
+
+        if isinstance(content, list):
+
+            parts = []
+
+            for item in content:
+
+                if isinstance(item, dict):
+
+                    parts.append(
+                        str(item.get("text", ""))
+                    )
+
+                else:
+
+                    parts.append(str(item))
+
+            content = "\n".join(parts)
+
+        return str(content).strip()
+
+    except Exception as error:
+
+        logger.exception("%s failed", role)
+
+        return (
+            f"{role} could not complete its task.\n"
+            f"Error: {error}"
+        )
+
+
+# ============================================================
+# AGENT 1
+# REQUIREMENTS AGENT
+# ============================================================
+
+def requirements_agent(
+    state: DevCrewState
+) -> DevCrewState:
+
+    logger.info("AGENT 1 -> Requirements Agent")
+
+    request = state["user_request"]
+
+    result = ask_agent(
+        "Requirements Agent",
+        f"""
+Analyze this software development request:
+
+{request}
+
+Identify:
+
+1. Functional requirements
+2. Non-functional requirements
+3. User roles
+4. Inputs and outputs
+5. Important constraints
+6. Possible edge cases
+"""
+    )
+
+    return {
+        "requirements": result
+    }
+
+
+# ============================================================
+# AGENT 2
+# ARCHITECT AGENT
+# ============================================================
+
+def architect_agent(
+    state: DevCrewState
+) -> DevCrewState:
+
+    logger.info("AGENT 2 -> Architect Agent")
+
+    result = ask_agent(
+        "Software Architect",
+        f"""
+Design the architecture for this request:
+
+USER REQUEST:
+{state["user_request"]}
+
+REQUIREMENTS:
+{state["requirements"]}
+
+Define:
+
+1. Recommended technology stack
+2. Application architecture
+3. Main modules
+4. API structure
+5. Database design where required
+6. Data flow
+7. Security considerations
+8. Deployment approach
+"""
+    )
+
+    return {
+        "architecture": result
+    }
+
+
+# ============================================================
+# AGENT 3
+# DEVELOPER AGENT
+# ============================================================
+
+def developer_agent(
+    state: DevCrewState
+) -> DevCrewState:
+
+    logger.info("AGENT 3 -> Developer Agent")
+
+    result = ask_agent(
+        "Senior Developer",
+        f"""
+Develop the solution based on:
+
+USER REQUEST:
+{state["user_request"]}
+
+REQUIREMENTS:
+{state["requirements"]}
+
+ARCHITECTURE:
+{state["architecture"]}
+
+Provide:
+
+1. Project structure
+2. Important implementation details
+3. Relevant code examples
+4. API implementation where appropriate
+5. Database implementation where appropriate
+6. Configuration requirements
+7. Error handling
+"""
+    )
+
+    return {
+        "implementation": result
+    }
+
+
+# ============================================================
+# AGENT 4
+# TESTING AGENT
+# ============================================================
+
+def testing_agent(
+    state: DevCrewState
+) -> DevCrewState:
+
+    logger.info("AGENT 4 -> Testing Agent")
+
+    result = ask_agent(
+        "QA and Testing Engineer",
+        f"""
+Create a testing strategy for this project.
+
+USER REQUEST:
+{state["user_request"]}
+
+REQUIREMENTS:
+{state["requirements"]}
+
+ARCHITECTURE:
+{state["architecture"]}
+
+IMPLEMENTATION:
 {state["implementation"]}
 
-REVIEWER:
+Identify:
+
+1. Unit tests
+2. API tests
+3. Integration tests
+4. Validation tests
+5. Security tests
+6. Edge cases
+7. Expected results
+"""
+    )
+
+    return {
+        "testing": result
+    }
+
+
+# ============================================================
+# AGENT 5
+# REVIEWER AGENT
+# ============================================================
+
+def reviewer_agent(
+    state: DevCrewState
+) -> DevCrewState:
+
+    logger.info("AGENT 5 -> Reviewer Agent")
+
+    result = ask_agent(
+        "Senior Code Reviewer",
+        f"""
+Perform a technical review.
+
+USER REQUEST:
+{state["user_request"]}
+
+REQUIREMENTS:
+{state["requirements"]}
+
+ARCHITECTURE:
+{state["architecture"]}
+
+IMPLEMENTATION:
+{state["implementation"]}
+
+TESTING:
+{state["testing"]}
+
+Review:
+
+1. Correctness
+2. Requirement coverage
+3. Security
+4. Maintainability
+5. Scalability
+6. Error handling
+7. Testing coverage
+8. Deployment readiness
+
+Give specific improvements.
+"""
+    )
+
+    return {
+        "review": result
+    }
+
+
+# ============================================================
+# AGENT 6
+# LEAD / FINALIZER AGENT
+# ============================================================
+
+def lead_agent(
+    state: DevCrewState
+) -> DevCrewState:
+
+    logger.info("AGENT 6 -> Lead Agent")
+
+    prompt = f"""
+You are the Lead Engineer of Dev Crew.
+
+Create the final professional development report.
+
+USER REQUEST:
+{state["user_request"]}
+
+REQUIREMENTS AGENT:
+{state["requirements"]}
+
+ARCHITECT AGENT:
+{state["architecture"]}
+
+DEVELOPER AGENT:
+{state["implementation"]}
+
+TESTING AGENT:
+{state["testing"]}
+
+REVIEWER AGENT:
 {state["review"]}
 
-Produce the final answer.
+Create one coherent final report.
 
-Use this structure:
+Use exactly this structure:
 
-# Dev Crew Result
+# Dev Crew Final Report
 
-## Understanding
+## 1. Project Understanding
 
-Explain the requested task.
+Explain what needs to be built.
 
-## Architecture
+## 2. Requirements
 
-Explain the proposed architecture.
+Summarize the important functional and non-functional requirements.
 
-## Implementation
+## 3. Architecture
 
-Provide useful implementation details or code.
+Explain the recommended architecture and technology stack.
 
-## Technical Review
+## 4. Implementation
 
-Explain important technical considerations.
+Explain the implementation approach and provide important code
+or project structure where useful.
 
-## How to Run
+## 5. Testing Strategy
 
-Explain how to run the solution.
+Explain how the application should be tested.
 
-## Next Steps
+## 6. Technical Review
 
-Give practical next steps.
+Summarize risks, issues and recommended improvements.
 
-Be concise but useful.
+## 7. Deployment
 
-Do not reveal hidden chain-of-thought.
-Do not claim that something was tested unless it was actually tested.
+Explain how the solution can be deployed.
+
+## 8. Final Recommendation
+
+Give a concise professional conclusion.
+
+IMPORTANT:
+
+- Do not reveal chain-of-thought.
+- Do not claim code was executed or tested.
+- Do not invent test results.
+- Clearly distinguish recommendations from completed work.
+- Make the report understandable to a student developer.
 """
 
     try:
@@ -220,83 +444,145 @@ Do not claim that something was tested unless it was actually tested.
             content = "\n".join(parts)
 
         return {
-            "output": str(content).strip()
+            "final_report": str(content).strip()
         }
 
     except Exception as error:
 
-        logger.exception("Gemini failed")
+        logger.exception("Lead Agent failed")
 
         return {
-            "output": (
-                "# Dev Crew\n\n"
-                "The LangGraph workflow completed, "
-                "but Gemini returned an error.\n\n"
+            "final_report": (
+                "# Dev Crew Final Report\n\n"
+                "The multi-agent workflow completed, "
+                "but the Lead Agent could not generate "
+                "the final synthesis.\n\n"
                 f"Error: {error}"
             )
         }
 
 
 # ============================================================
-# BUILD LANGGRAPH
+# LANGGRAPH
 # ============================================================
 
 builder = StateGraph(DevCrewState)
 
-builder.add_node("planner", planner)
-builder.add_node("developer", developer)
-builder.add_node("reviewer", reviewer)
-builder.add_node("finalizer", finalizer)
 
-builder.set_entry_point("planner")
+builder.add_node(
+    "requirements_agent",
+    requirements_agent
+)
 
-builder.add_edge("planner", "developer")
-builder.add_edge("developer", "reviewer")
-builder.add_edge("reviewer", "finalizer")
-builder.add_edge("finalizer", END)
+builder.add_node(
+    "architect_agent",
+    architect_agent
+)
 
-graph = builder.compile()
+builder.add_node(
+    "developer_agent",
+    developer_agent
+)
+
+builder.add_node(
+    "testing_agent",
+    testing_agent
+)
+
+builder.add_node(
+    "reviewer_agent",
+    reviewer_agent
+)
+
+builder.add_node(
+    "lead_agent",
+    lead_agent
+)
 
 
 # ============================================================
-# LANGSERVE FUNCTION
-#
-# IMPORTANT:
-# INPUT IS NOW A PLAIN STRING
-# NOT {"input": "..."}
+# WORKFLOW
 # ============================================================
 
-def run_dev_crew(task: str) -> str:
+builder.set_entry_point(
+    "requirements_agent"
+)
 
-    logger.info("LANGSERVE REQUEST RECEIVED")
-    logger.info("TASK: %s", task)
+builder.add_edge(
+    "requirements_agent",
+    "architect_agent"
+)
 
-    if not isinstance(task, str):
+builder.add_edge(
+    "architect_agent",
+    "developer_agent"
+)
 
-        task = str(task)
+builder.add_edge(
+    "developer_agent",
+    "testing_agent"
+)
 
-    task = task.strip()
+builder.add_edge(
+    "testing_agent",
+    "reviewer_agent"
+)
 
-    if not task:
+builder.add_edge(
+    "reviewer_agent",
+    "lead_agent"
+)
 
-        return "Please enter a software development task."
+builder.add_edge(
+    "lead_agent",
+    END
+)
+
+
+dev_crew_graph = builder.compile()
+
+
+# ============================================================
+# LANGSERVE
+# ============================================================
+
+def run_dev_crew(
+    user_request: str
+) -> str:
+
+    if not isinstance(user_request, str):
+
+        user_request = str(user_request)
+
+    user_request = user_request.strip()
+
+    if not user_request:
+
+        return "Please enter a software development request."
+
+    logger.info(
+        "Dev Crew request: %s",
+        user_request
+    )
 
     try:
 
-        result = graph.invoke(
+        result = dev_crew_graph.invoke(
             {
-                "task": task
+                "user_request": user_request
             }
         )
 
         return result.get(
-            "output",
-            "Dev Crew completed without producing an output."
+            "final_report",
+            "Dev Crew completed without a final report."
         )
 
     except Exception as error:
 
-        logger.exception("LANGGRAPH ERROR")
+        logger.exception(
+            "Dev Crew workflow failed"
+        )
 
         return (
             "# Dev Crew Error\n\n"
@@ -304,11 +590,9 @@ def run_dev_crew(task: str) -> str:
         )
 
 
-# ============================================================
-# RUNNABLE
-# ============================================================
-
-agent = RunnableLambda(run_dev_crew)
+agent = RunnableLambda(
+    run_dev_crew
+)
 
 
 # ============================================================
@@ -316,20 +600,17 @@ agent = RunnableLambda(run_dev_crew)
 # ============================================================
 
 app = FastAPI(
-    title="Dev Crew LangGraph Agent",
-    description="Multi-stage software development agent built with LangGraph",
-    version="1.0.0",
+    title="Dev Crew - LangGraph Multi-Agent",
+    version="2.0.0",
+    description=(
+        "Multi-agent software development team "
+        "implemented with LangGraph."
+    )
 )
 
 
 # ============================================================
-# LANGSERVE
-#
-# IMPORTANT:
-# input_type=str
-# output_type=str
-#
-# This removes the required 'input' object problem.
+# LANGSERVE ROUTE
 # ============================================================
 
 add_routes(
@@ -349,14 +630,17 @@ add_routes(
 def root():
 
     return {
-        "name": "Dev Crew",
+        "agent": "Dev Crew",
         "framework": "LangGraph",
+        "type": "Multi-Agent",
         "status": "running",
-        "workflow": [
-            "Planner",
-            "Developer",
-            "Reviewer",
-            "Finalizer"
+        "agents": [
+            "Requirements Agent",
+            "Architect Agent",
+            "Developer Agent",
+            "Testing Agent",
+            "Reviewer Agent",
+            "Lead Agent"
         ],
         "playground": "/agent/playground/"
     }
@@ -377,22 +661,18 @@ def health():
 
 
 # ============================================================
-# SERVER
+# RUN
 # ============================================================
 
 if __name__ == "__main__":
 
-    import uvicorn
-
-    port = int(
-        os.environ.get(
-            "PORT",
-            "8000"
-        )
-    )
-
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=port
+        port=int(
+            os.environ.get(
+                "PORT",
+                "8000"
+            )
+        )
     )
