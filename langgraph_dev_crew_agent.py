@@ -3,9 +3,10 @@ import logging
 from typing import TypedDict
 
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field
+
 from fastapi import FastAPI
 from langserve import add_routes
-import uvicorn
 
 from langchain_core.runnables import RunnableLambda
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -14,36 +15,41 @@ from langgraph.graph import StateGraph, END
 
 
 # ============================================================
-# CONFIG
+# ENVIRONMENT
 # ============================================================
 
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("dev_crew")
+logger = logging.getLogger("devcrew")
 
-API_KEY = (
-    os.getenv("GOOGLE_API_KEY")
-    or os.getenv("GEMINI_API_KEY")
-)
 
-if not API_KEY:
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
+if not GOOGLE_API_KEY:
+    GOOGLE_API_KEY = os.getenv("GEMINI_API_KEY")
+
+if not GOOGLE_API_KEY:
     raise RuntimeError(
-        "Missing GOOGLE_API_KEY or GEMINI_API_KEY environment variable."
+        "GOOGLE_API_KEY or GEMINI_API_KEY is missing from Render Environment Variables."
     )
 
 
 # ============================================================
-# GEMINI
+# INPUT / OUTPUT SCHEMAS
+#
+# THIS IS THE IMPORTANT FIX FOR LANGSERVE PLAYGROUND
 # ============================================================
 
-llm = ChatGoogleGenerativeAI(
-    model="gemini-3.6-flash",
-    google_api_key=API_KEY,
-    temperature=0,
-    max_retries=0,
-    timeout=25,
-)
+class AgentInput(BaseModel):
+    input: str = Field(
+        ...,
+        description="Software development task for the Dev Crew"
+    )
+
+
+class AgentOutput(BaseModel):
+    output: str
 
 
 # ============================================================
@@ -51,35 +57,55 @@ llm = ChatGoogleGenerativeAI(
 # ============================================================
 
 class DevCrewState(TypedDict, total=False):
+
     input: str
+
     plan: str
+
     implementation: str
+
     review: str
+
     output: str
 
 
 # ============================================================
-# NODE 1 — PLANNER
+# GEMINI
+# ============================================================
+
+llm = ChatGoogleGenerativeAI(
+    model="gemini-2.5-flash",
+    google_api_key=GOOGLE_API_KEY,
+    temperature=0.2,
+    max_retries=1,
+    timeout=30,
+)
+
+
+# ============================================================
+# NODE 1
+# PLANNER
 # ============================================================
 
 def planner(state: DevCrewState):
 
-    user_input = state.get("input", "").strip()
+    logger.info("DEV CREW -> PLANNER")
 
-    logger.info("NODE 1: Planner")
+    task = state.get("input", "").strip()
 
     plan = f"""
-DEVELOPMENT PLAN
+Task received:
 
-User request:
-{user_input}
+{task}
 
-Plan:
+Development plan:
+
 1. Understand the requested application.
-2. Identify the main components.
-3. Select appropriate technologies.
-4. Design the implementation.
-5. Consider validation, security and deployment.
+2. Identify functional requirements.
+3. Identify the required technologies.
+4. Design the application architecture.
+5. Plan the implementation.
+6. Consider testing, security and deployment.
 """
 
     return {
@@ -88,27 +114,32 @@ Plan:
 
 
 # ============================================================
-# NODE 2 — DEVELOPER
+# NODE 2
+# DEVELOPER
 # ============================================================
 
 def developer(state: DevCrewState):
 
-    logger.info("NODE 2: Developer")
+    logger.info("DEV CREW -> DEVELOPER")
 
     implementation = f"""
-DEVELOPER ANALYSIS
+Developer analysis:
 
-User request:
+Task:
 {state.get("input", "")}
 
-Planning information:
+Plan:
 {state.get("plan", "")}
 
-The implementation should be:
-- Practical
-- Maintainable
-- Production-oriented
-- Easy for a student developer to understand
+Implementation should contain:
+
+- Project structure
+- Backend/frontend components when applicable
+- APIs
+- Database considerations
+- Error handling
+- Configuration
+- Deployment considerations
 """
 
     return {
@@ -117,27 +148,32 @@ The implementation should be:
 
 
 # ============================================================
-# NODE 3 — REVIEWER
+# NODE 3
+# REVIEWER
 # ============================================================
 
 def reviewer(state: DevCrewState):
 
-    logger.info("NODE 3: Reviewer")
+    logger.info("DEV CREW -> REVIEWER")
 
     review = f"""
-CODE REVIEW
+Technical review:
 
-Check the proposed solution for:
+Task:
+{state.get("input", "")}
+
+Developer proposal:
+{state.get("implementation", "")}
+
+Review the proposed solution for:
 
 - Correctness
 - Missing requirements
-- Error handling
 - Security
+- Error handling
 - Maintainability
-- Deployment problems
-
-Request:
-{state.get("input", "")}
+- Scalability
+- Deployment issues
 """
 
     return {
@@ -146,17 +182,20 @@ Request:
 
 
 # ============================================================
-# NODE 4 — FINALIZER
+# NODE 4
+# FINALIZER
 # ============================================================
 
 def finalizer(state: DevCrewState):
 
-    logger.info("NODE 4: Finalizer")
+    logger.info("DEV CREW -> FINALIZER")
 
     prompt = f"""
-You are Dev Crew, a professional AI software development team.
+You are Dev Crew, an AI software development team.
 
-USER REQUEST:
+You received the following software development task:
+
+USER TASK:
 {state.get("input", "")}
 
 PLANNER:
@@ -168,30 +207,34 @@ DEVELOPER:
 REVIEWER:
 {state.get("review", "")}
 
-Create the final response.
+Create a professional final answer.
 
-Use this format:
+Use this structure:
 
-## Dev Crew Result
+# Dev Crew Result
 
-### Approach
-Explain the solution briefly.
+## 1. Understanding
+Explain what the user wants.
 
-### Implementation
-Give the required code or implementation details.
+## 2. Architecture
+Explain the proposed architecture.
 
-### Review
-Mention important issues and improvements.
+## 3. Implementation
+Provide useful implementation details or code where appropriate.
 
-### Next Steps
-Explain how to run or deploy it.
+## 4. Technical Review
+Mention important considerations, risks and improvements.
 
-Rules:
-- Be practical.
-- Be concise but useful.
-- Do not reveal chain-of-thought.
-- Do not claim that code was tested unless it actually was.
+## 5. How to Run
+Explain how the project can be run.
+
+## 6. Next Steps
+Give practical next steps.
+
+Do not reveal hidden chain-of-thought.
+Do not claim something was tested unless it actually was.
 """
+
 
     try:
 
@@ -201,102 +244,127 @@ Rules:
 
         if isinstance(content, list):
 
-            parts = []
+            text_parts = []
 
             for item in content:
 
                 if isinstance(item, dict):
-                    parts.append(str(item.get("text", "")))
-                else:
-                    parts.append(str(item))
 
-            content = "\n".join(parts)
+                    text_parts.append(
+                        str(item.get("text", ""))
+                    )
+
+                else:
+
+                    text_parts.append(str(item))
+
+            content = "\n".join(text_parts)
 
         content = str(content).strip()
 
         if not content:
-            raise RuntimeError("Gemini returned an empty response.")
 
-        logger.info("Gemini response received")
+            content = "Dev Crew completed but Gemini returned an empty response."
 
         return {
             "output": content
         }
 
+
     except Exception as error:
 
         logger.exception("Gemini error")
 
-        # IMPORTANT:
-        # Never leave the Playground hanging.
         return {
-            "output": f"""
-## Dev Crew Result
-
-### Status
-
-The LangGraph workflow completed, but the Gemini generation step
-returned an error.
-
-### Error
-
-{error}
-
-### Workflow
-
-Planner → Developer → Reviewer → Finalizer
-
-The LangGraph agent itself is running correctly.
-
-Please check the Gemini API key and Render environment variables.
-"""
+            "output": (
+                "# Dev Crew\n\n"
+                "The LangGraph workflow completed, "
+                "but the Gemini generation step failed.\n\n"
+                f"**Error:** `{error}`"
+            )
         }
 
 
 # ============================================================
-# BUILD GRAPH
+# BUILD LANGGRAPH
 # ============================================================
 
-graph_builder = StateGraph(DevCrewState)
+builder = StateGraph(DevCrewState)
 
-graph_builder.add_node("planner", planner)
-graph_builder.add_node("developer", developer)
-graph_builder.add_node("reviewer", reviewer)
-graph_builder.add_node("finalizer", finalizer)
 
-graph_builder.set_entry_point("planner")
+builder.add_node(
+    "planner",
+    planner
+)
 
-graph_builder.add_edge("planner", "developer")
-graph_builder.add_edge("developer", "reviewer")
-graph_builder.add_edge("reviewer", "finalizer")
-graph_builder.add_edge("finalizer", END)
+builder.add_node(
+    "developer",
+    developer
+)
 
-graph = graph_builder.compile()
+builder.add_node(
+    "reviewer",
+    reviewer
+)
+
+builder.add_node(
+    "finalizer",
+    finalizer
+)
 
 
 # ============================================================
-# LANGSERVE FUNCTION
+# GRAPH FLOW
 # ============================================================
 
-def run_agent(data):
+builder.set_entry_point("planner")
 
-    logger.info("PLAYGROUND REQUEST RECEIVED")
+builder.add_edge(
+    "planner",
+    "developer"
+)
 
-    # LangServe sends a dictionary.
-    if isinstance(data, dict):
-        user_input = data.get("input", "")
-    else:
-        user_input = str(data)
+builder.add_edge(
+    "developer",
+    "reviewer"
+)
 
-    user_input = str(user_input).strip()
+builder.add_edge(
+    "reviewer",
+    "finalizer"
+)
+
+builder.add_edge(
+    "finalizer",
+    END
+)
+
+
+graph = builder.compile()
+
+
+# ============================================================
+# LANGSERVE RUNNER
+# ============================================================
+
+def run_devcrew(data: AgentInput):
+
+    logger.info("LANGSERVE REQUEST RECEIVED")
+
+    user_input = data.input.strip()
 
     if not user_input:
 
-        return {
-            "output": "Please enter a development request."
-        }
+        return AgentOutput(
+            output="Please enter a software development task."
+        )
 
-    logger.info("INPUT: %s", user_input)
+
+    logger.info(
+        "USER INPUT: %s",
+        user_input
+    )
+
 
     try:
 
@@ -306,34 +374,41 @@ def run_agent(data):
             }
         )
 
-        return {
-            "output": result.get(
+
+        return AgentOutput(
+            output=result.get(
                 "output",
-                "Dev Crew completed without producing a response."
+                "Dev Crew completed without producing an output."
             )
-        }
+        )
+
 
     except Exception as error:
 
-        logger.exception("GRAPH ERROR")
+        logger.exception(
+            "LANGGRAPH ERROR"
+        )
 
-        return {
-            "output": f"""
-## Dev Crew Error
-
-The LangGraph workflow encountered an error.
-
-Error:
-{error}
-"""
-        }
+        return AgentOutput(
+            output=(
+                "# Dev Crew Error\n\n"
+                f"`{error}`"
+            )
+        )
 
 
 # ============================================================
-# LANGSERVE RUNNABLE
+# CREATE TYPED LANGSERVE RUNNABLE
+#
+# THIS IS THE CRITICAL PART
 # ============================================================
 
-agent = RunnableLambda(run_agent)
+agent = RunnableLambda(
+    run_devcrew
+).with_types(
+    input_type=AgentInput,
+    output_type=AgentOutput
+)
 
 
 # ============================================================
@@ -341,21 +416,28 @@ agent = RunnableLambda(run_agent)
 # ============================================================
 
 app = FastAPI(
-    title="Dev Crew LangGraph Agent",
-    description="LangGraph multi-stage software development agent",
+    title="Dev Crew - LangGraph Agent",
+    description=(
+        "A LangGraph-based AI software development crew "
+        "consisting of Planner, Developer, Reviewer and Finalizer."
+    ),
     version="1.0.0",
 )
 
 
+# ============================================================
+# LANGSERVE ROUTES
+# ============================================================
+
 add_routes(
     app,
     agent,
-    path="/agent",
+    path="/agent"
 )
 
 
 # ============================================================
-# HEALTH
+# ROOT
 # ============================================================
 
 @app.get("/")
@@ -375,11 +457,17 @@ def root():
     }
 
 
+# ============================================================
+# HEALTH
+# ============================================================
+
 @app.get("/health")
 def health():
 
     return {
-        "status": "healthy"
+        "status": "healthy",
+        "agent": "Dev Crew",
+        "framework": "LangGraph"
     }
 
 
@@ -389,7 +477,14 @@ def health():
 
 if __name__ == "__main__":
 
-    port = int(os.environ.get("PORT", "8000"))
+    import uvicorn
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            "8000"
+        )
+    )
 
     uvicorn.run(
         app,
