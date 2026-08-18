@@ -39,6 +39,7 @@ llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
     google_api_key=GOOGLE_API_KEY,
     temperature=0,
+    max_retries=1,
 )
 
 
@@ -55,16 +56,13 @@ class DevCrewState(TypedDict, total=False):
 
 
 # ============================================================
-# PLAYGROUND INPUT SCHEMA
-# IMPORTANT:
-# LangServe needs a concrete input schema to render the
-# /agent/playground/ input box.
+# PLAYGROUND SCHEMAS
 # ============================================================
 
 class DevCrewInput(BaseModel):
     input: str = Field(
         default="",
-        description="Describe the software development task you want Dev Crew to solve."
+        description="Describe the software development task."
     )
 
 
@@ -73,112 +71,43 @@ class DevCrewOutput(BaseModel):
 
 
 # ============================================================
-# GRAPH NODES
+# NODE 1 — PLANNER
 # ============================================================
 
 def planner_node(state: DevCrewState) -> DevCrewState:
     request = state.get("request", "").strip()
 
-    response = llm.invoke(
-        f"""
-You are the Planner in a software development team called Dev Crew.
+    # Keep this stage fast and deterministic.
+    plan = f"""Development Plan
 
-Analyze this development request:
+Goal:
+Solve the following development request:
 
 {request}
 
-Create a practical plan containing:
-1. Goal
-2. Requirements
-3. Technical approach
-4. Main components/files
-5. Implementation steps
-6. Important edge cases
-
-Do not write the full implementation yet.
-Keep the plan concise and practical.
+Planning checklist:
+1. Understand the requested functionality.
+2. Identify the required frontend/backend/data components.
+3. Choose a practical technology approach.
+4. Consider validation, errors, security, and deployment.
+5. Produce an implementation that is simple enough to maintain.
 """
-    )
 
-    return {"plan": response.content}
+    logger.info("Planner completed")
+    return {"plan": plan}
 
+
+# ============================================================
+# NODE 2 — DEVELOPER
+# ============================================================
 
 def developer_node(state: DevCrewState) -> DevCrewState:
     request = state.get("request", "")
     plan = state.get("plan", "")
 
-    response = llm.invoke(
-        f"""
-You are the Developer in Dev Crew.
-
-Original request:
-{request}
-
-Planner's plan:
-{plan}
-
-Now produce the implementation.
-
-Rules:
-- Prefer simple, maintainable solutions.
-- If code is required, provide complete relevant code.
-- Do not use pseudocode when real code can be provided.
-- Explain important implementation decisions.
-- Never claim that code was executed or tested unless it actually was.
-"""
-    )
-
-    return {"implementation": response.content}
-
-
-def reviewer_node(state: DevCrewState) -> DevCrewState:
-    request = state.get("request", "")
-    implementation = state.get("implementation", "")
-
-    response = llm.invoke(
-        f"""
-You are the Senior Code Reviewer in Dev Crew.
-
-Original request:
-{request}
-
-Proposed implementation:
-{implementation}
-
-Review it for:
-- Correctness
-- Missing requirements
-- Bugs
-- Security issues
-- Maintainability
-- Runtime/deployment problems
-
-Start with exactly one of:
-
-VERDICT: PASS
-
-or
-
-VERDICT: NEEDS CHANGES
-
-Then give a concise review and specific fixes where necessary.
-"""
-    )
-
-    return {"review": response.content}
-
-
-def finalizer_node(state: DevCrewState) -> DevCrewState:
-    request = state.get("request", "")
-    plan = state.get("plan", "")
-    implementation = state.get("implementation", "")
-    review = state.get("review", "")
-
-    response = llm.invoke(
-        f"""
-You are the Finalizer of Dev Crew.
-
-Create the final developer-ready response.
+    # This stage prepares the implementation task for the final
+    # Gemini call instead of making another expensive API request.
+    implementation = f"""Developer Task
 
 Original request:
 {request}
@@ -186,34 +115,125 @@ Original request:
 Plan:
 {plan}
 
-Implementation:
+The final developer response should provide:
+- A practical architecture
+- Complete relevant code where appropriate
+- Clear setup instructions
+- Error handling
+- Maintainable implementation
+"""
+
+    logger.info("Developer stage completed")
+    return {"implementation": implementation}
+
+
+# ============================================================
+# NODE 3 — REVIEWER
+# ============================================================
+
+def reviewer_node(state: DevCrewState) -> DevCrewState:
+    request = state.get("request", "")
+    implementation = state.get("implementation", "")
+
+    review = f"""Senior Review Checklist
+
+Request:
+{request}
+
+Review the proposed solution for:
+- Correctness
+- Missing requirements
+- Security
+- Error handling
+- Maintainability
+- Deployment/runtime concerns
+
+The final response must avoid claiming that code was tested unless it
+was actually executed.
+"""
+
+    logger.info("Reviewer stage completed")
+    return {"review": review}
+
+
+# ============================================================
+# NODE 4 — FINALIZER
+# ============================================================
+
+def finalizer_node(state: DevCrewState) -> DevCrewState:
+    request = state.get("request", "")
+    plan = state.get("plan", "")
+    implementation = state.get("implementation", "")
+    review = state.get("review", "")
+
+    prompt = f"""
+You are Dev Crew, a professional software development team.
+
+You have four internal stages:
+Planner -> Developer -> Reviewer -> Finalizer.
+
+Create the final answer for this user request.
+
+USER REQUEST:
+{request}
+
+PLANNER:
+{plan}
+
+DEVELOPER:
 {implementation}
 
-Review:
+REVIEWER:
 {review}
 
-Use this structure:
+Return a useful, human-readable answer using this structure:
 
 ## Dev Crew Result
 
 ### Approach
-Brief explanation.
+Explain the recommended solution briefly.
 
 ### Implementation
-Provide the final useful implementation/code.
+Provide complete relevant code when code is requested.
+Use markdown code blocks.
 
 ### Review
-Summarize the review and whether the solution is ready.
+Mention important correctness, security, and maintainability considerations.
 
 ### Next Steps
-Give practical run, test, or deployment steps.
+Give concise instructions to run, test, or deploy the solution.
 
-Do not reveal chain-of-thought.
-Do not invent test results.
+Important:
+- Do not reveal chain-of-thought.
+- Do not claim that code was executed or tested.
+- Do not invent files, APIs, or test results.
+- Keep the answer practical and developer-ready.
 """
-    )
 
-    return {"final_answer": response.content}
+    logger.info("Finalizer calling Gemini")
+
+    try:
+        response = llm.invoke(prompt)
+        answer = response.content
+
+        if isinstance(answer, list):
+            answer = "\n".join(
+                str(item.get("text", item))
+                if isinstance(item, dict)
+                else str(item)
+                for item in answer
+            )
+
+        return {"final_answer": str(answer)}
+
+    except Exception as exc:
+        logger.exception("Gemini finalizer failed")
+        return {
+            "final_answer": (
+                "Dev Crew could not complete the Gemini response.\n\n"
+                f"Error: {exc}"
+            )
+        }
 
 
 # ============================================================
@@ -228,6 +248,7 @@ builder.add_node("reviewer", reviewer_node)
 builder.add_node("finalizer", finalizer_node)
 
 builder.set_entry_point("planner")
+
 builder.add_edge("planner", "developer")
 builder.add_edge("developer", "reviewer")
 builder.add_edge("reviewer", "finalizer")
@@ -248,17 +269,13 @@ def run_dev_crew(data: DevCrewInput) -> DevCrewOutput:
             output="Enter a development request above, then click Start."
         )
 
-    logger.info("Dev Crew request: %s", request)
+    logger.info("Dev Crew request received: %s", request)
 
     try:
         result = dev_crew_graph.invoke(
-            {
-                "request": request
-            }
+            {"request": request}
         )
 
-        # Return a single text field so the LangServe Playground
-        # has a normal text renderer for the output.
         return DevCrewOutput(
             output=result.get(
                 "final_answer",
@@ -267,12 +284,11 @@ def run_dev_crew(data: DevCrewInput) -> DevCrewOutput:
         )
 
     except Exception as exc:
-        logger.exception("Dev Crew execution failed")
+        logger.exception("Dev Crew graph failed")
 
         return DevCrewOutput(
             output=(
-                "Dev Crew encountered an error while processing "
-                "your request.\n\n"
+                "Dev Crew encountered an error.\n\n"
                 f"Error: {exc}"
             )
         )
@@ -290,20 +306,13 @@ dev_crew_runnable = RunnableLambda(run_dev_crew).with_types(
 
 app = FastAPI(
     title="Dev Crew - LangGraph Agent",
-    version="1.1.0",
+    version="2.0.0",
     description=(
-        "LangGraph development workflow: "
+        "Fast LangGraph development workflow: "
         "Planner -> Developer -> Reviewer -> Finalizer."
     ),
 )
 
-
-# This creates:
-# /agent
-# /agent/invoke
-# /agent/batch
-# /agent/stream
-# /agent/playground/
 add_routes(
     app,
     dev_crew_runnable,
@@ -335,7 +344,7 @@ def health():
 
 
 # ============================================================
-# LOCAL RUN
+# RUN
 # ============================================================
 
 if __name__ == "__main__":
