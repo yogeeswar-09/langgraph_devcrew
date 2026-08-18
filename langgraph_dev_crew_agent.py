@@ -1,295 +1,260 @@
 import os
 import logging
-from typing import TypedDict, List
+from typing import TypedDict
 
 from dotenv import load_dotenv
-
 from fastapi import FastAPI
 from langserve import add_routes
 import uvicorn
 
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.runnables import RunnableLambda
-
 from langgraph.graph import StateGraph, END
 
-# ----------------------------
-# Load Environment
-# ----------------------------
+
 load_dotenv()
 
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
 if not GOOGLE_API_KEY:
-    raise ValueError("GOOGLE_API_KEY is missing. Add it to your .env file.")
+    raise ValueError(
+        "GOOGLE_API_KEY or GEMINI_API_KEY is missing. "
+        "Add it in Render Environment Variables."
+    )
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("dev_crew_agent")
+logger = logging.getLogger("dev_crew")
 
-# ----------------------------
-# Initialize LLM
-# ----------------------------
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
     google_api_key=GOOGLE_API_KEY,
-    temperature=0.2,
+    temperature=0,
 )
 
-# ----------------------------
-# Shared Graph State
-# ----------------------------
-class DevCrewState(TypedDict):
-    task: str
+
+class DevCrewState(TypedDict, total=False):
+    request: str
     plan: str
-    code: str
+    implementation: str
     review: str
-    approved: bool
-    iteration: int
-    max_iterations: int
-    history: List[str]
+    final_answer: str
 
 
-# ----------------------------
-# Planner Node
-# ----------------------------
 def planner_node(state: DevCrewState) -> DevCrewState:
-    logger.info("Planner is working...")
+    request = state.get("request", "").strip()
 
-    messages = [
-        SystemMessage(
-            content=(
-                "You are the Planner on a software development crew. "
-                "Break the user's task into a short, concrete implementation "
-                "plan. Include functions/classes, edge cases, and approach. "
-                "Do not write code yet."
-            )
-        ),
-        HumanMessage(content=f"Task: {state['task']}"),
-    ]
+    if not request:
+        return {"plan": "No development request was provided."}
 
-    plan = llm.invoke(messages).content
-    state["plan"] = plan
-    state["history"].append("Planner produced an implementation plan.")
+    response = llm.invoke(f"""
+You are the Planner of Dev Crew, a professional software development team.
 
-    return state
+Analyze the user's development request and create a practical implementation plan.
 
+User request:
+{request}
 
-# ----------------------------
-# Coder Node
-# ----------------------------
-def coder_node(state: DevCrewState) -> DevCrewState:
-    logger.info(
-        "Coder is working - iteration %s",
-        state["iteration"] + 1,
-    )
+Return:
+1. Goal
+2. Requirements
+3. Technical approach
+4. Files/components likely needed
+5. Step-by-step implementation plan
+6. Important edge cases
 
-    if state.get("review"):
-        messages = [
-            SystemMessage(
-                content=(
-                    "You are the Coder on a software development crew. "
-                    "Revise your previous code according to the reviewer's "
-                    "feedback. Return only the final code in one Python code block."
-                )
-            ),
-            HumanMessage(
-                content=(
-                    f"Task:\n{state['task']}\n\n"
-                    f"Plan:\n{state['plan']}\n\n"
-                    f"Previous code:\n{state['code']}\n\n"
-                    f"Reviewer feedback:\n{state['review']}"
-                )
-            ),
-        ]
-    else:
-        messages = [
-            SystemMessage(
-                content=(
-                    "You are the Coder on a software development crew. "
-                    "Write clean, working Python code that implements the plan. "
-                    "Return only the code in one Python code block."
-                )
-            ),
-            HumanMessage(
-                content=(
-                    f"Task:\n{state['task']}\n\n"
-                    f"Plan:\n{state['plan']}"
-                )
-            ),
-        ]
+Be concise but useful. Do not write the full implementation yet.
+""")
 
-    code = llm.invoke(messages).content
-    state["code"] = code
-    state["iteration"] += 1
-    state["history"].append(
-        f"Coder produced code (iteration {state['iteration']})."
-    )
-
-    return state
+    return {"plan": response.content}
 
 
-# ----------------------------
-# Reviewer Node
-# ----------------------------
+def developer_node(state: DevCrewState) -> DevCrewState:
+    request = state.get("request", "")
+    plan = state.get("plan", "")
+
+    response = llm.invoke(f"""
+You are the Developer of Dev Crew.
+
+Implement the user's request using the plan created by the Planner.
+
+USER REQUEST:
+{request}
+
+PLANNER'S PLAN:
+{plan}
+
+Produce a practical implementation.
+
+Rules:
+- Prefer simple, maintainable solutions.
+- Use clear code.
+- Explain important implementation decisions.
+- If code is required, provide complete relevant code rather than pseudocode.
+- Do not claim that code was executed or tested when it was not.
+""")
+
+    return {"implementation": response.content}
+
+
 def reviewer_node(state: DevCrewState) -> DevCrewState:
-    logger.info("Reviewer is working...")
+    request = state.get("request", "")
+    implementation = state.get("implementation", "")
 
-    messages = [
-        SystemMessage(
-            content=(
-                "You are the Reviewer on a software development crew. "
-                "Review the code against the task and plan for correctness, "
-                "edge cases, and code quality.\n\n"
-                "Respond exactly as:\n"
-                "VERDICT: APPROVED or NEEDS_REVISION\n"
-                "FEEDBACK: specific actionable feedback, or None if approved."
-            )
-        ),
-        HumanMessage(
-            content=(
-                f"Task:\n{state['task']}\n\n"
-                f"Plan:\n{state['plan']}\n\n"
-                f"Code:\n{state['code']}"
-            )
-        ),
-    ]
+    response = llm.invoke(f"""
+You are the Senior Reviewer of Dev Crew.
 
-    result = llm.invoke(messages).content
-    state["review"] = result
+Review the proposed solution below against the original request.
 
-    # Normalize whitespace before checking the verdict.
-    normalized = result.upper().replace(" ", "")
-    state["approved"] = "VERDICT:APPROVED" in normalized
+ORIGINAL REQUEST:
+{request}
 
-    state["history"].append(
-        "Reviewer verdict: "
-        + ("APPROVED" if state["approved"] else "NEEDS_REVISION")
-        + "."
-    )
+PROPOSED IMPLEMENTATION:
+{implementation}
 
-    return state
+Check for:
+- Correctness
+- Missing requirements
+- Bugs
+- Security issues
+- Poor assumptions
+- Maintainability
+- Deployment/runtime concerns
+
+Return:
+VERDICT: PASS or NEEDS CHANGES
+
+Then give a concise review and exact fixes if needed.
+""")
+
+    return {"review": response.content}
 
 
-# ----------------------------
-# Conditional Routing
-# ----------------------------
-def route_after_review(state: DevCrewState) -> str:
-    if state["approved"]:
-        return "end"
+def finalizer_node(state: DevCrewState) -> DevCrewState:
+    request = state.get("request", "")
+    plan = state.get("plan", "")
+    implementation = state.get("implementation", "")
+    review = state.get("review", "")
 
-    if state["iteration"] >= state["max_iterations"]:
-        logger.warning("Maximum iterations reached.")
-        return "end"
+    response = llm.invoke(f"""
+You are the Finalizer of Dev Crew.
 
-    return "revise"
+Create the final response for the developer.
+
+ORIGINAL REQUEST:
+{request}
+
+PLAN:
+{plan}
+
+IMPLEMENTATION:
+{implementation}
+
+REVIEW:
+{review}
+
+Return a polished developer-ready answer.
+
+Structure it as:
+
+## Dev Crew Result
+
+### Approach
+Briefly explain the approach.
+
+### Implementation
+Give the final implementation or the most useful complete code.
+
+### Review
+Summarize the review and whether the solution is ready.
+
+### Next Steps
+Give practical steps to run, test, or deploy it.
+
+Do not mention internal chain-of-thought.
+Do not invent test results.
+""")
+
+    return {"final_answer": response.content}
 
 
-# ----------------------------
-# Build LangGraph
-# ----------------------------
 graph_builder = StateGraph(DevCrewState)
 
 graph_builder.add_node("planner", planner_node)
-graph_builder.add_node("coder", coder_node)
+graph_builder.add_node("developer", developer_node)
 graph_builder.add_node("reviewer", reviewer_node)
+graph_builder.add_node("finalizer", finalizer_node)
 
 graph_builder.set_entry_point("planner")
-graph_builder.add_edge("planner", "coder")
-graph_builder.add_edge("coder", "reviewer")
-
-graph_builder.add_conditional_edges(
-    "reviewer",
-    route_after_review,
-    {
-        "revise": "coder",
-        "end": END,
-    },
-)
+graph_builder.add_edge("planner", "developer")
+graph_builder.add_edge("developer", "reviewer")
+graph_builder.add_edge("reviewer", "finalizer")
+graph_builder.add_edge("finalizer", END)
 
 dev_crew_graph = graph_builder.compile()
 
-# ----------------------------
-# LangServe Runnable
-# ----------------------------
-def run_dev_crew(request):
-    task = request.get("input", "")
 
-    if not task:
-        return "Please provide a software development task."
+def run_dev_crew(payload):
+    if isinstance(payload, str):
+        request = payload.strip()
+    elif isinstance(payload, dict):
+        request = str(payload.get("input", "")).strip()
+    else:
+        request = ""
 
-    initial_state: DevCrewState = {
-        "task": task,
-        "plan": "",
-        "code": "",
-        "review": "",
-        "approved": False,
-        "iteration": 0,
-        "max_iterations": 3,
-        "history": [],
-    }
+    if not request:
+        return {"error": "Please enter a development request."}
 
-    logger.info("Starting Dev Crew for task: %s", task)
+    logger.info("Dev Crew request received: %s", request)
 
     try:
-        final_state = dev_crew_graph.invoke(initial_state)
+        result = dev_crew_graph.invoke({"request": request})
 
-        return (
-            "PLAN:\n"
-            + final_state["plan"]
-            + "\n\nFINAL CODE:\n"
-            + final_state["code"]
-            + "\n\nREVIEW:\n"
-            + final_state["review"]
-            + "\n\nHISTORY:\n"
-            + "\n".join("- " + item for item in final_state["history"])
-        )
+        return {
+            "input": request,
+            "plan": result.get("plan", ""),
+            "implementation": result.get("implementation", ""),
+            "review": result.get("review", ""),
+            "final_answer": result.get("final_answer", ""),
+        }
+
     except Exception as exc:
         logger.exception("Dev Crew execution failed")
-        return f"Dev Crew error: {exc}"
+        return {
+            "input": request,
+            "error": "Dev Crew could not complete the request.",
+            "details": str(exc),
+        }
 
 
-agent_runnable = RunnableLambda(run_dev_crew)
+dev_crew_runnable = RunnableLambda(run_dev_crew)
 
-# ----------------------------
-# FastAPI
-# ----------------------------
 app = FastAPI(
-    title="LangGraph Dev Crew Agent",
-    version="1.0",
+    title="Dev Crew - LangGraph Agent",
+    version="1.0.0",
     description=(
-        "A multi-agent software development crew built with LangGraph: "
-        "Planner, Coder, and Reviewer with a conditional revision loop."
+        "LangGraph development workflow: "
+        "Planner -> Developer -> Reviewer -> Finalizer."
     ),
 )
 
-add_routes(
-    app,
-    agent_runnable,
-    path="/agent",
-)
+add_routes(app, dev_crew_runnable, path="/agent")
 
-# ----------------------------
-# Health Check
-# ----------------------------
+
 @app.get("/")
 def root():
     return {
-        "agent": "LangGraph Dev Crew Agent",
+        "agent": "Dev Crew",
+        "framework": "LangGraph",
         "status": "running",
-        "workflow": "Planner -> Coder -> Reviewer -> Revision",
-        "endpoint": "/agent",
+        "workflow": "Planner -> Developer -> Reviewer -> Finalizer",
+        "playground": "/agent/playground/",
     }
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy"}
+    return {"status": "healthy", "agent": "Dev Crew"}
 
 
-# ----------------------------
-# Run
-# ----------------------------
 if __name__ == "__main__":
     uvicorn.run(
         "langgraph_dev_crew_agent:app",
