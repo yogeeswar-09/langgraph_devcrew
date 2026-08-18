@@ -63,7 +63,7 @@ class DevCrewState(TypedDict, total=False):
 
 class DevCrewInput(BaseModel):
     input: str = Field(
-        ...,
+        default="",
         description="Describe the software development task you want Dev Crew to solve."
     )
 
@@ -241,11 +241,11 @@ dev_crew_graph = builder.compile()
 # ============================================================
 
 def run_dev_crew(data: DevCrewInput) -> DevCrewOutput:
-    request = data.input.strip()
+    request = (data.input or "").strip()
 
     if not request:
         return DevCrewOutput(
-            output="Please enter a development request."
+            output="Enter a development request above, then click Start."
         )
 
     logger.info("Dev Crew request: %s", request)
