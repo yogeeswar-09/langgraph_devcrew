@@ -3,8 +3,6 @@ import logging
 from typing import TypedDict
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
-
 from fastapi import FastAPI
 from langserve import add_routes
 
@@ -15,58 +13,20 @@ from langgraph.graph import StateGraph, END
 
 
 # ============================================================
-# ENVIRONMENT
+# CONFIG
 # ============================================================
 
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("devcrew")
+logger = logging.getLogger("dev_crew")
 
-
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-
-if not GOOGLE_API_KEY:
-    GOOGLE_API_KEY = os.getenv("GEMINI_API_KEY")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
 
 if not GOOGLE_API_KEY:
     raise RuntimeError(
-        "GOOGLE_API_KEY or GEMINI_API_KEY is missing from Render Environment Variables."
+        "GOOGLE_API_KEY or GEMINI_API_KEY is missing."
     )
-
-
-# ============================================================
-# INPUT / OUTPUT SCHEMAS
-#
-# THIS IS THE IMPORTANT FIX FOR LANGSERVE PLAYGROUND
-# ============================================================
-
-class AgentInput(BaseModel):
-    input: str = Field(
-        ...,
-        description="Software development task for the Dev Crew"
-    )
-
-
-class AgentOutput(BaseModel):
-    output: str
-
-
-# ============================================================
-# LANGGRAPH STATE
-# ============================================================
-
-class DevCrewState(TypedDict, total=False):
-
-    input: str
-
-    plan: str
-
-    implementation: str
-
-    review: str
-
-    output: str
 
 
 # ============================================================
@@ -83,89 +43,87 @@ llm = ChatGoogleGenerativeAI(
 
 
 # ============================================================
-# NODE 1
+# LANGGRAPH STATE
+# ============================================================
+
+class DevCrewState(TypedDict, total=False):
+    task: str
+    plan: str
+    implementation: str
+    review: str
+    output: str
+
+
+# ============================================================
 # PLANNER
 # ============================================================
 
 def planner(state: DevCrewState):
 
-    logger.info("DEV CREW -> PLANNER")
+    task = state["task"]
 
-    task = state.get("input", "").strip()
+    logger.info("DEV CREW: PLANNER")
 
-    plan = f"""
-Task received:
+    return {
+        "plan": f"""
+Task:
 
 {task}
 
 Development plan:
 
-1. Understand the requested application.
-2. Identify functional requirements.
-3. Identify the required technologies.
-4. Design the application architecture.
-5. Plan the implementation.
+1. Understand the requirements.
+2. Identify the main components.
+3. Select appropriate technologies.
+4. Design the architecture.
+5. Plan implementation.
 6. Consider testing, security and deployment.
 """
-
-    return {
-        "plan": plan
     }
 
 
 # ============================================================
-# NODE 2
 # DEVELOPER
 # ============================================================
 
 def developer(state: DevCrewState):
 
-    logger.info("DEV CREW -> DEVELOPER")
+    logger.info("DEV CREW: DEVELOPER")
 
-    implementation = f"""
-Developer analysis:
+    return {
+        "implementation": f"""
+Developer analysis for:
 
-Task:
-{state.get("input", "")}
+{state["task"]}
 
-Plan:
-{state.get("plan", "")}
+The solution should include:
 
-Implementation should contain:
-
-- Project structure
+- Appropriate project structure
+- Required APIs
 - Backend/frontend components when applicable
-- APIs
 - Database considerations
 - Error handling
 - Configuration
 - Deployment considerations
 """
-
-    return {
-        "implementation": implementation
     }
 
 
 # ============================================================
-# NODE 3
 # REVIEWER
 # ============================================================
 
 def reviewer(state: DevCrewState):
 
-    logger.info("DEV CREW -> REVIEWER")
+    logger.info("DEV CREW: REVIEWER")
 
-    review = f"""
-Technical review:
+    return {
+        "review": f"""
+Technical review for:
 
-Task:
-{state.get("input", "")}
+{state["task"]}
 
-Developer proposal:
-{state.get("implementation", "")}
-
-Review the proposed solution for:
+Check:
 
 - Correctness
 - Missing requirements
@@ -173,68 +131,69 @@ Review the proposed solution for:
 - Error handling
 - Maintainability
 - Scalability
-- Deployment issues
+- Deployment problems
 """
-
-    return {
-        "review": review
     }
 
 
 # ============================================================
-# NODE 4
 # FINALIZER
 # ============================================================
 
 def finalizer(state: DevCrewState):
 
-    logger.info("DEV CREW -> FINALIZER")
+    logger.info("DEV CREW: FINALIZER")
 
     prompt = f"""
-You are Dev Crew, an AI software development team.
-
-You received the following software development task:
+You are Dev Crew, a professional AI software development team.
 
 USER TASK:
-{state.get("input", "")}
+{state["task"]}
 
 PLANNER:
-{state.get("plan", "")}
+{state["plan"]}
 
 DEVELOPER:
-{state.get("implementation", "")}
+{state["implementation"]}
 
 REVIEWER:
-{state.get("review", "")}
+{state["review"]}
 
-Create a professional final answer.
+Produce the final answer.
 
 Use this structure:
 
 # Dev Crew Result
 
-## 1. Understanding
-Explain what the user wants.
+## Understanding
 
-## 2. Architecture
+Explain the requested task.
+
+## Architecture
+
 Explain the proposed architecture.
 
-## 3. Implementation
-Provide useful implementation details or code where appropriate.
+## Implementation
 
-## 4. Technical Review
-Mention important considerations, risks and improvements.
+Provide useful implementation details or code.
 
-## 5. How to Run
-Explain how the project can be run.
+## Technical Review
 
-## 6. Next Steps
+Explain important technical considerations.
+
+## How to Run
+
+Explain how to run the solution.
+
+## Next Steps
+
 Give practical next steps.
 
-Do not reveal hidden chain-of-thought.
-Do not claim something was tested unless it actually was.
-"""
+Be concise but useful.
 
+Do not reveal hidden chain-of-thought.
+Do not claim that something was tested unless it was actually tested.
+"""
 
     try:
 
@@ -244,43 +203,36 @@ Do not claim something was tested unless it actually was.
 
         if isinstance(content, list):
 
-            text_parts = []
+            parts = []
 
             for item in content:
 
                 if isinstance(item, dict):
 
-                    text_parts.append(
+                    parts.append(
                         str(item.get("text", ""))
                     )
 
                 else:
 
-                    text_parts.append(str(item))
+                    parts.append(str(item))
 
-            content = "\n".join(text_parts)
-
-        content = str(content).strip()
-
-        if not content:
-
-            content = "Dev Crew completed but Gemini returned an empty response."
+            content = "\n".join(parts)
 
         return {
-            "output": content
+            "output": str(content).strip()
         }
-
 
     except Exception as error:
 
-        logger.exception("Gemini error")
+        logger.exception("Gemini failed")
 
         return {
             "output": (
                 "# Dev Crew\n\n"
                 "The LangGraph workflow completed, "
-                "but the Gemini generation step failed.\n\n"
-                f"**Error:** `{error}`"
+                "but Gemini returned an error.\n\n"
+                f"Error: {error}"
             )
         }
 
@@ -291,124 +243,72 @@ Do not claim something was tested unless it actually was.
 
 builder = StateGraph(DevCrewState)
 
-
-builder.add_node(
-    "planner",
-    planner
-)
-
-builder.add_node(
-    "developer",
-    developer
-)
-
-builder.add_node(
-    "reviewer",
-    reviewer
-)
-
-builder.add_node(
-    "finalizer",
-    finalizer
-)
-
-
-# ============================================================
-# GRAPH FLOW
-# ============================================================
+builder.add_node("planner", planner)
+builder.add_node("developer", developer)
+builder.add_node("reviewer", reviewer)
+builder.add_node("finalizer", finalizer)
 
 builder.set_entry_point("planner")
 
-builder.add_edge(
-    "planner",
-    "developer"
-)
-
-builder.add_edge(
-    "developer",
-    "reviewer"
-)
-
-builder.add_edge(
-    "reviewer",
-    "finalizer"
-)
-
-builder.add_edge(
-    "finalizer",
-    END
-)
-
+builder.add_edge("planner", "developer")
+builder.add_edge("developer", "reviewer")
+builder.add_edge("reviewer", "finalizer")
+builder.add_edge("finalizer", END)
 
 graph = builder.compile()
 
 
 # ============================================================
-# LANGSERVE RUNNER
+# LANGSERVE FUNCTION
+#
+# IMPORTANT:
+# INPUT IS NOW A PLAIN STRING
+# NOT {"input": "..."}
 # ============================================================
 
-def run_devcrew(data: AgentInput):
+def run_dev_crew(task: str) -> str:
 
     logger.info("LANGSERVE REQUEST RECEIVED")
+    logger.info("TASK: %s", task)
 
-    user_input = data.input.strip()
+    if not isinstance(task, str):
 
-    if not user_input:
+        task = str(task)
 
-        return AgentOutput(
-            output="Please enter a software development task."
-        )
+    task = task.strip()
 
+    if not task:
 
-    logger.info(
-        "USER INPUT: %s",
-        user_input
-    )
-
+        return "Please enter a software development task."
 
     try:
 
         result = graph.invoke(
             {
-                "input": user_input
+                "task": task
             }
         )
 
-
-        return AgentOutput(
-            output=result.get(
-                "output",
-                "Dev Crew completed without producing an output."
-            )
+        return result.get(
+            "output",
+            "Dev Crew completed without producing an output."
         )
-
 
     except Exception as error:
 
-        logger.exception(
-            "LANGGRAPH ERROR"
-        )
+        logger.exception("LANGGRAPH ERROR")
 
-        return AgentOutput(
-            output=(
-                "# Dev Crew Error\n\n"
-                f"`{error}`"
-            )
+        return (
+            "# Dev Crew Error\n\n"
+            f"{error}"
         )
 
 
 # ============================================================
-# CREATE TYPED LANGSERVE RUNNABLE
-#
-# THIS IS THE CRITICAL PART
+# RUNNABLE
 # ============================================================
 
-agent = RunnableLambda(
-    run_devcrew
-).with_types(
-    input_type=AgentInput,
-    output_type=AgentOutput
-)
+agent = RunnableLambda(run_dev_crew)
 
 
 # ============================================================
@@ -416,23 +316,28 @@ agent = RunnableLambda(
 # ============================================================
 
 app = FastAPI(
-    title="Dev Crew - LangGraph Agent",
-    description=(
-        "A LangGraph-based AI software development crew "
-        "consisting of Planner, Developer, Reviewer and Finalizer."
-    ),
+    title="Dev Crew LangGraph Agent",
+    description="Multi-stage software development agent built with LangGraph",
     version="1.0.0",
 )
 
 
 # ============================================================
-# LANGSERVE ROUTES
+# LANGSERVE
+#
+# IMPORTANT:
+# input_type=str
+# output_type=str
+#
+# This removes the required 'input' object problem.
 # ============================================================
 
 add_routes(
     app,
     agent,
-    path="/agent"
+    path="/agent",
+    input_type=str,
+    output_type=str,
 )
 
 
@@ -472,7 +377,7 @@ def health():
 
 
 # ============================================================
-# START SERVER
+# SERVER
 # ============================================================
 
 if __name__ == "__main__":
