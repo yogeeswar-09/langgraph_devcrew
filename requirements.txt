@@ -1,9 +1,10 @@
 fastapi
 uvicorn
-langserve
-langgraph
-langchain
-langchain-google-genai
-langchain-core
 python-dotenv
-sse-starlette
+langserve
+langchain
+langchain-core
+langchain-google-genai
+langgraph
+sse_starlette
+pydantic
