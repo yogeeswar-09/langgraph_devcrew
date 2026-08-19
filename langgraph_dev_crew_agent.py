@@ -9,7 +9,6 @@ import uvicorn
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.runnables import RunnableLambda
-
 from langgraph.graph import StateGraph, END
 
 
@@ -40,14 +39,14 @@ if not GOOGLE_API_KEY:
 llm = ChatGoogleGenerativeAI(
     model="gemini-3.6-flash",
     google_api_key=GOOGLE_API_KEY,
-    temperature=0.2,
+    temperature=0,
     max_retries=0,
-    timeout=45,
+    timeout=30,
 )
 
 
 # ============================================================
-# SHARED LANGGRAPH STATE
+# LANGGRAPH STATE
 # ============================================================
 
 class DevCrewState(TypedDict, total=False):
@@ -61,16 +60,23 @@ class DevCrewState(TypedDict, total=False):
     testing: str
 
     review: str
+
     final_report: str
 
 
 # ============================================================
-# SAFE GEMINI CALL
+# GEMINI HELPER
 # ============================================================
 
-def call_gemini(prompt: str, agent_name: str) -> str:
+def ask_gemini(
+    prompt: str,
+    agent_name: str
+) -> str:
 
-    logger.info("%s -> Gemini", agent_name)
+    logger.info(
+        "Running %s",
+        agent_name
+    )
 
     try:
 
@@ -80,27 +86,38 @@ def call_gemini(prompt: str, agent_name: str) -> str:
 
         if isinstance(content, list):
 
-            parts = []
+            text_parts = []
 
             for item in content:
 
                 if isinstance(item, dict):
-                    parts.append(
-                        str(item.get("text", ""))
-                    )
-                else:
-                    parts.append(str(item))
 
-            content = "\n".join(parts)
+                    text = item.get("text")
+
+                    if text:
+                        text_parts.append(
+                            str(text)
+                        )
+
+                else:
+
+                    text_parts.append(
+                        str(item)
+                    )
+
+            content = "\n".join(text_parts)
 
         return str(content).strip()
 
     except Exception as error:
 
-        logger.exception("%s failed", agent_name)
+        logger.exception(
+            "%s failed",
+            agent_name
+        )
 
         return (
-            f"{agent_name} failed.\n\n"
+            f"{agent_name} failed.\n"
             f"Error: {error}"
         )
 
@@ -110,69 +127,45 @@ def call_gemini(prompt: str, agent_name: str) -> str:
 # REQUIREMENTS + ARCHITECTURE
 # ============================================================
 
-def requirements_architect_agent(
+def requirements_architecture(
     state: DevCrewState
 ) -> DevCrewState:
-
-    logger.info(
-        "AGENT 1 -> Requirements + Architecture"
-    )
 
     request = state["user_request"]
 
     prompt = f"""
-You are the Requirements and Architecture team
-inside a multi-agent software development system called Dev Crew.
+You are Agent 1 of Dev Crew.
+
+ROLE:
+Requirements Analyst + Software Architect
 
 USER REQUEST:
-
 {request}
 
-Your job has TWO responsibilities.
+Analyze the request and produce a concise technical specification.
 
-============================================================
-PART A — REQUIREMENTS ANALYST
-============================================================
+Return ONLY these sections:
 
-Identify:
+REQUIREMENTS:
+- Functional requirements
+- Non-functional requirements
+- Main users
+- Important inputs/outputs
 
-1. Functional requirements
-2. Non-functional requirements
-3. User roles
-4. Inputs and outputs
-5. Constraints
-6. Edge cases
+ARCHITECTURE:
+- Recommended stack
+- Main components
+- API approach
+- Database approach
+- Authentication/security
+- Deployment approach
 
-============================================================
-PART B — SOFTWARE ARCHITECT
-============================================================
-
-Based on those requirements, design:
-
-1. Technology stack
-2. Application architecture
-3. Main modules
-4. API structure
-5. Database design if required
-6. Data flow
-7. Authentication/security
-8. Deployment approach
-
-Return the answer using:
-
-# Requirements
-
-...
-
-# Architecture
-
-...
+Keep the response under 700 words.
 
 Do not reveal chain-of-thought.
-Be practical and concise.
 """
 
-    result = call_gemini(
+    result = ask_gemini(
         prompt,
         "Requirements + Architecture Agent"
     )
@@ -185,77 +178,51 @@ Be practical and concise.
 
 # ============================================================
 # AGENT 2
-# DEVELOPER + TESTING
+# DEVELOPMENT + TESTING
 # ============================================================
 
-def developer_testing_agent(
+def development_testing(
     state: DevCrewState
 ) -> DevCrewState:
 
-    logger.info(
-        "AGENT 2 -> Developer + Testing"
-    )
+    specification = state["requirements"]
 
     prompt = f"""
-You are the Developer and QA team inside Dev Crew.
+You are Agent 2 of Dev Crew.
 
-USER REQUEST:
+ROLE:
+Senior Developer + QA Engineer
 
-{state["user_request"]}
+PROJECT SPECIFICATION:
+{specification}
 
-REQUIREMENTS AND ARCHITECTURE:
+Create a practical implementation and testing plan.
 
-{state["requirements"]}
+Return ONLY:
 
-Your job has TWO responsibilities.
+IMPLEMENTATION:
+- Project structure
+- Important modules
+- API implementation
+- Database implementation
+- Authentication
+- Error handling
+- Deployment configuration
 
-============================================================
-PART A — SENIOR DEVELOPER
-============================================================
+TESTING:
+- Unit tests
+- API tests
+- Integration tests
+- Security tests
+- Edge cases
 
-Create the implementation plan.
+Keep the response under 800 words.
 
-Include:
-
-1. Project structure
-2. Important files
-3. Backend/frontend implementation
-4. APIs
-5. Database implementation
-6. Configuration
-7. Error handling
-8. Relevant code examples where useful
-
-============================================================
-PART B — QA ENGINEER
-============================================================
-
-Create a testing strategy.
-
-Include:
-
-1. Unit tests
-2. API tests
-3. Integration tests
-4. Validation tests
-5. Security tests
-6. Edge cases
-7. Expected behavior
-
-Return:
-
-# Implementation
-
-...
-
-# Testing Strategy
-
-...
-
-Do not claim anything has actually been tested.
+Do not claim that anything was actually executed or tested.
+Do not reveal chain-of-thought.
 """
 
-    result = call_gemini(
+    result = ask_gemini(
         prompt,
         "Developer + Testing Agent"
     )
@@ -271,124 +238,87 @@ Do not claim anything has actually been tested.
 # REVIEWER + LEAD
 # ============================================================
 
-def reviewer_lead_agent(
+def reviewer_lead(
     state: DevCrewState
 ) -> DevCrewState:
 
-    logger.info(
-        "AGENT 3 -> Reviewer + Lead"
-    )
+    # --------------------------------------------------------
+    # Create a compact input instead of sending huge outputs.
+    # --------------------------------------------------------
+
+    requirements = state.get(
+        "requirements",
+        ""
+    )[:4500]
+
+    implementation = state.get(
+        "implementation",
+        ""
+    )[:5000]
 
     prompt = f"""
-You are the Senior Reviewer and Lead Engineer
-of Dev Crew.
+You are Agent 3 of Dev Crew.
+
+ROLE:
+Senior Reviewer + Lead Engineer
 
 USER REQUEST:
-
 {state["user_request"]}
 
-REQUIREMENTS:
+PROJECT SPECIFICATION:
+{requirements}
 
-{state["requirements"]}
+DEVELOPMENT PLAN:
+{implementation}
 
-ARCHITECTURE:
+Review the proposed solution and create the final report.
 
-{state["architecture"]}
+Evaluate:
 
-IMPLEMENTATION:
-
-{state["implementation"]}
-
-TESTING:
-
-{state["testing"]}
-
-You have TWO responsibilities.
-
-============================================================
-PART A — SENIOR REVIEWER
-============================================================
-
-Review the proposed solution for:
-
-1. Correctness
-2. Requirement coverage
-3. Security
-4. Error handling
-5. Maintainability
-6. Scalability
-7. Testing coverage
+1. Requirement coverage
+2. Architecture quality
+3. Implementation quality
+4. Security
+5. Testing
+6. Maintainability
+7. Scalability
 8. Deployment readiness
 
-Identify specific improvements.
-
-============================================================
-PART B — LEAD ENGINEER
-============================================================
-
-Create the final professional Dev Crew report.
-
-Use EXACTLY this structure:
+Return EXACTLY this structure:
 
 # Dev Crew Final Report
 
-## 1. Project Understanding
+## Project Understanding
 
-Explain what needs to be built.
+## Requirements
 
-## 2. Requirements
+## Architecture
 
-Summarize the key requirements.
+## Implementation
 
-## 3. Architecture
+## Testing Strategy
 
-Explain the architecture and technology stack.
+## Technical Review
 
-## 4. Implementation
+## Deployment
 
-Explain the implementation approach and
-provide useful code/project structure where appropriate.
+## Final Recommendation
 
-## 5. Testing Strategy
+## Reviewer Verdict
 
-Explain how the application should be tested.
-
-## 6. Technical Review
-
-Summarize risks, weaknesses and improvements.
-
-## 7. Deployment
-
-Explain how the solution can be deployed.
-
-## 8. Final Recommendation
-
-Give a professional conclusion.
-
-IMPORTANT:
-
-- Do not reveal chain-of-thought.
-- Do not claim code was executed.
-- Do not invent test results.
-- Clearly distinguish recommendations from completed work.
-- Make the report understandable to a student developer.
-
-At the end, include:
-
-### Reviewer Verdict
-
-State whether the proposed solution is:
-
+Choose:
 READY
-
 or
-
 NEEDS IMPROVEMENT
 
-and briefly explain why.
+Keep the final answer under 1200 words.
+
+Do not claim code was executed.
+Do not invent test results.
+Do not reveal chain-of-thought.
 """
 
-    result = call_gemini(
+    result = ask_gemini(
         prompt,
         "Reviewer + Lead Agent"
     )
@@ -400,42 +330,44 @@ and briefly explain why.
 
 
 # ============================================================
-# BUILD LANGGRAPH
+# LANGGRAPH
 # ============================================================
 
-builder = StateGraph(DevCrewState)
-
-builder.add_node(
-    "requirements_architect",
-    requirements_architect_agent
+builder = StateGraph(
+    DevCrewState
 )
 
 builder.add_node(
-    "developer_testing",
-    developer_testing_agent
+    "requirements_architecture",
+    requirements_architecture
+)
+
+builder.add_node(
+    "development_testing",
+    development_testing
 )
 
 builder.add_node(
     "reviewer_lead",
-    reviewer_lead_agent
+    reviewer_lead
 )
 
 
 # ============================================================
-# WORKFLOW
+# GRAPH FLOW
 # ============================================================
 
 builder.set_entry_point(
-    "requirements_architect"
+    "requirements_architecture"
 )
 
 builder.add_edge(
-    "requirements_architect",
-    "developer_testing"
+    "requirements_architecture",
+    "development_testing"
 )
 
 builder.add_edge(
-    "developer_testing",
+    "development_testing",
     "reviewer_lead"
 )
 
@@ -449,24 +381,27 @@ dev_crew_graph = builder.compile()
 
 
 # ============================================================
-# LANGSERVE
+# LANGSERVE FUNCTION
 # ============================================================
 
 def run_dev_crew(
     user_request: str
 ) -> str:
 
-    if not isinstance(user_request, str):
-        user_request = str(user_request)
+    if user_request is None:
 
-    user_request = user_request.strip()
+        return "Please enter a project requirement."
+
+    user_request = str(
+        user_request
+    ).strip()
 
     if not user_request:
-        return "Please enter a software development request."
+
+        return "Please enter a project requirement."
 
     logger.info(
-        "DEV CREW REQUEST: %s",
-        user_request
+        "Starting Dev Crew workflow"
     )
 
     try:
@@ -477,9 +412,18 @@ def run_dev_crew(
             }
         )
 
-        return result.get(
-            "final_report",
-            "Dev Crew completed without a final report."
+        final_report = result.get(
+            "final_report"
+        )
+
+        if final_report:
+
+            return final_report
+
+        return (
+            "# Dev Crew\n\n"
+            "The workflow completed, "
+            "but no final report was generated."
         )
 
     except Exception as error:
@@ -494,6 +438,10 @@ def run_dev_crew(
         )
 
 
+# ============================================================
+# LANGSERVE RUNNABLE
+# ============================================================
+
 agent = RunnableLambda(
     run_dev_crew
 )
@@ -504,11 +452,12 @@ agent = RunnableLambda(
 # ============================================================
 
 app = FastAPI(
-    title="Dev Crew - LangGraph Multi-Agent",
-    version="3.0.0",
+    title="Dev Crew",
+    version="4.0.0",
     description=(
-        "Quota-efficient multi-agent software "
-        "development team implemented with LangGraph."
+        "Quota-efficient multi-agent "
+        "software development workflow "
+        "built with LangGraph."
     )
 )
 
@@ -522,7 +471,7 @@ add_routes(
     agent,
     path="/agent",
     input_type=str,
-    output_type=str,
+    output_type=str
 )
 
 
@@ -539,17 +488,11 @@ def root():
         "type": "Multi-Agent",
         "status": "running",
 
-        "agents": [
-            "Requirements + Architecture Agent",
-            "Developer + Testing Agent",
-            "Reviewer + Lead Agent"
+        "workflow": [
+            "Requirements + Architecture",
+            "Development + Testing",
+            "Reviewer + Lead"
         ],
-
-        "workflow": (
-            "Requirements/Architecture -> "
-            "Developer/Testing -> "
-            "Reviewer/Lead"
-        ),
 
         "gemini_calls_per_request": 3,
 
@@ -567,8 +510,7 @@ def health():
     return {
         "status": "healthy",
         "agent": "Dev Crew",
-        "framework": "LangGraph",
-        "gemini_calls_per_request": 3
+        "framework": "LangGraph"
     }
 
 
